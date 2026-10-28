@@ -217,10 +217,12 @@ These figures are from one local run and are not a universal performance guarant
 - The benchmark is a local measurement, not a controlled performance study.
 - Future improvements could include Kafka integration, a streaming framework, configurable event-time watermarks, CI automation, and monitoring dashboards.
 
-## AI Assistance Disclosure
 
-AI tools were used to assist with development tasks such as debugging, test design, and documentation. The implementation was reviewed and the automated test suite was executed locally. The project author remains responsible for understanding the code, verifying the results, and explaining the design decisions.
+## AI Usage Disclosure
 
+ChatGPT was used to assist with development guidance, debugging, test planning, and documentation. The original prompts were not saved as a separate transcript; a reconstructed summary is provided in [AI Prompt History](AI_PROMPT_HISTORY.md).
+
+I reviewed the implementation, ran the automated test suite, and checked the pipeline output and reconciliation results. I remain responsible for understanding the code, verifying its behavior, and explaining the design decisions and limitations.
 ## Author
 
 **Susmitha Rayapati**
