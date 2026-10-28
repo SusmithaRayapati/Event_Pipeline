@@ -1,4 +1,3 @@
-
 import json
 import os
 import sqlite3
@@ -144,6 +143,51 @@ class TestPipelineIntegration(unittest.TestCase):
 
         self.assertEqual(event_count_after_rerun, 3)
         self.assertEqual(rejected_after_rerun, 1)
+
+    def test_retry_after_failed_run(self):
+        # Save the input and temporarily remove it.
+        original_content = self.input_file.read_text(encoding="utf-8")
+        self.input_file.unlink()
+
+        # The pipeline should fail because the input file is missing.
+        with self.assertRaises(AssertionError):
+            self.run_pipeline()
+
+        # Verify failure monitoring and checkpoint state.
+        with sqlite3.connect(self.db_file) as conn:
+            failed_run = conn.execute("""
+                SELECT status, failure_reason
+                FROM pipeline_runs
+                ORDER BY started_at DESC
+                LIMIT 1
+            """).fetchone()
+
+            checkpoint = conn.execute(
+                "SELECT last_line FROM checkpoints"
+            ).fetchone()[0]
+
+        self.assertEqual(failed_run[0], "failed")
+        self.assertIsNotNone(failed_run[1])
+        self.assertEqual(checkpoint, 0)
+
+        # Restore the input and retry.
+        self.input_file.write_text(original_content, encoding="utf-8")
+        output = self.run_pipeline()
+
+        self.assertIn("New events inserted: 3", output)
+        self.assertIn("Reconciliation passed", output)
+
+        with sqlite3.connect(self.db_file) as conn:
+            checkpoint = conn.execute(
+                "SELECT last_line FROM checkpoints"
+            ).fetchone()[0]
+
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM events"
+            ).fetchone()[0]
+
+        self.assertEqual(checkpoint, 5)
+        self.assertEqual(event_count, 3)
 
 
 if __name__ == "__main__":
