@@ -4,6 +4,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import main as pipeline
 
 
 class TestStreamingBehavior(unittest.TestCase):
@@ -16,34 +19,17 @@ class TestStreamingBehavior(unittest.TestCase):
         self.input_file = self.root / "events.jsonl"
         self.db_file = self.root / "events.db"
 
-        with sqlite3.connect(self.db_file) as conn:
-            conn.executescript("""
-                CREATE TABLE events (
-                    event_id TEXT PRIMARY KEY,
-                    event_type TEXT NOT NULL,
-                    entity_id TEXT NOT NULL,
-                    event_timestamp TEXT NOT NULL,
-                    amount REAL NOT NULL
-                );
+        self.settings = patch.multiple(
+            pipeline,
+            INPUT_FILE=self.input_file,
+            DB_FILE=self.db_file,
+            SOURCE_NAME=self.input_file.name,
+            BATCH_SIZE=2,
+        )
+        self.settings.start()
+        self.addCleanup(self.settings.stop)
 
-                CREATE TABLE checkpoints (
-                    source TEXT PRIMARY KEY,
-                    last_line INTEGER NOT NULL
-                );
-
-                CREATE TABLE rejected_events (
-                    line_number INTEGER PRIMARY KEY,
-                    raw_record TEXT,
-                    errors TEXT NOT NULL
-                );
-
-                CREATE TABLE late_events (
-                    event_id TEXT PRIMARY KEY,
-                    event_timestamp TEXT NOT NULL
-                );
-
-                INSERT INTO checkpoints VALUES ('events.jsonl', 0);
-            """)
+        pipeline.setup_database()
 
     def make_event(self, event_id, timestamp, amount=100):
         return {
@@ -54,69 +40,74 @@ class TestStreamingBehavior(unittest.TestCase):
             "amount": amount,
         }
 
-    def write_events(self, events):
-        with self.input_file.open("w", encoding="utf-8") as file:
-            for event in events:
-                file.write(json.dumps(event) + "\n")
+    def make_batch(self, events):
+        return [
+            (line_number, json.dumps(event))
+            for line_number, event in enumerate(events, start=1)
+        ]
+
+    def query(self, sql, parameters=()):
+        with sqlite3.connect(self.db_file) as conn:
+            return conn.execute(sql, parameters).fetchone()
 
     def test_empty_input(self):
-        self.input_file.write_text("", encoding="utf-8")
+        result = pipeline.process_and_checkpoint([])
 
-        with self.input_file.open(encoding="utf-8") as file:
-            self.assertEqual(list(file), [])
-
-        with sqlite3.connect(self.db_file) as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM events"
-            ).fetchone()[0]
-
-        self.assertEqual(count, 0)
+        self.assertEqual(result, (0, 0, 0, 0))
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM events")[0], 0
+        )
+        self.assertEqual(
+            self.query(
+                "SELECT last_line FROM checkpoints WHERE source = ?",
+                (self.input_file.name,),
+            )[0],
+            0,
+        )
 
     def test_duplicate_event_id(self):
         event = self.make_event(
             "evt_001", "2026-10-28T10:00:00+00:00"
         )
-        self.write_events([event, event])
 
-        with self.input_file.open(encoding="utf-8") as file:
-            records = [json.loads(line) for line in file]
+        result = pipeline.process_and_checkpoint(
+            self.make_batch([event, event])
+        )
 
-        with sqlite3.connect(self.db_file) as conn:
-            for item in records:
-                conn.execute("""
-                    INSERT OR IGNORE INTO events
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    item["event_id"],
-                    item["event_type"],
-                    item["entity_id"],
-                    item["event_timestamp"],
-                    item["amount"],
-                ))
-
-            count = conn.execute(
-                "SELECT COUNT(*) FROM events"
-            ).fetchone()[0]
-
-        self.assertEqual(count, 1)
+        self.assertEqual(result, (1, 1, 0, 0))
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM events")[0], 1
+        )
+        self.assertEqual(
+            self.query(
+                "SELECT last_line FROM checkpoints WHERE source = ?",
+                (self.input_file.name,),
+            )[0],
+            2,
+        )
 
     def test_late_event_detection(self):
-        timestamps = [
-            "2026-10-28T10:00:00+00:00",
-            "2026-10-28T09:00:00+00:00",
-        ]
+        recent = self.make_event(
+            "evt_recent", "2026-10-28T10:00:00+00:00"
+        )
+        late = self.make_event(
+            "evt_late", "2026-10-26T09:00:00+00:00"
+        )
 
-        max_seen = None
-        late_count = 0
+        result = pipeline.process_and_checkpoint(
+            self.make_batch([recent, late])
+        )
 
-        for timestamp in timestamps:
-            if max_seen is not None and timestamp < max_seen:
-                late_count += 1
-
-            if max_seen is None or timestamp > max_seen:
-                max_seen = timestamp
-
-        self.assertEqual(late_count, 1)
+        self.assertEqual(result, (2, 0, 0, 1))
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM late_events")[0], 1
+        )
+        self.assertEqual(
+            self.query(
+                "SELECT event_id FROM late_events"
+            )[0],
+            "evt_late",
+        )
 
     def test_aggregate_reconciliation(self):
         events = [
@@ -128,42 +119,38 @@ class TestStreamingBehavior(unittest.TestCase):
             ),
         ]
 
-        with sqlite3.connect(self.db_file) as conn:
-            for event in events:
-                conn.execute("""
-                    INSERT INTO events
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    event["event_id"],
-                    event["event_type"],
-                    event["entity_id"],
-                    event["event_timestamp"],
-                    event["amount"],
-                ))
+        result = pipeline.process_and_checkpoint(
+            self.make_batch(events)
+        )
 
-            count, total_amount = conn.execute("""
-                SELECT COUNT(*), SUM(amount)
-                FROM events
-            """).fetchone()
+        self.assertEqual(result, (2, 0, 0, 0))
+        count, total_amount = self.query("""
+            SELECT COUNT(*), SUM(amount) FROM events
+        """)
+
+        distinct_ids = self.query(
+            "SELECT COUNT(DISTINCT event_id) FROM events"
+        )[0]
 
         self.assertEqual(count, 2)
         self.assertEqual(total_amount, 300)
+        self.assertEqual(count, distinct_ids)
 
     def test_checkpoint_value(self):
-        with sqlite3.connect(self.db_file) as conn:
-            conn.execute("""
-                UPDATE checkpoints
-                SET last_line = 10
-                WHERE source = 'events.jsonl'
-            """)
+        event = self.make_event(
+            "evt_001", "2026-10-28T10:00:00+00:00"
+        )
 
-            checkpoint = conn.execute("""
-                SELECT last_line
-                FROM checkpoints
-                WHERE source = 'events.jsonl'
-            """).fetchone()[0]
+        pipeline.process_and_checkpoint(
+            self.make_batch([event])
+        )
 
-        self.assertEqual(checkpoint, 10)
+        checkpoint = self.query(
+            "SELECT last_line FROM checkpoints WHERE source = ?",
+            (self.input_file.name,),
+        )[0]
+
+        self.assertEqual(checkpoint, 1)
 
 
 if __name__ == "__main__":
