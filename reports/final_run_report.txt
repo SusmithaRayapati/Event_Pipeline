@@ -1,0 +1,27 @@
+AGGREGATE REPORT
+----------------
+order_placed: count=33402, total_amount=84781615.06
+payment_completed: count=33275, total_amount=84503696.24
+product_viewed: count=33325, total_amount=85245441.3
+
+RECONCILIATION REPORT
+---------------------
+Total events: 100002
+Distinct event IDs: 100002
+Rejected records: 1
+Late events recorded: 1
+Reconciliation passed: all stored event IDs are unique.
+
+Run ID: 37b7fa6c-e156-429e-b913-59f10d85aa98
+Source file: data\performance_events.jsonl
+Mode: normal
+Started at: 2026-10-28T17:49:21.185370+00:00
+Batch size: 100
+Lines processed this run: 100004
+New events inserted: 100002
+Duplicates skipped: 1
+Rejected records: 1
+Late events detected this run: 1
+Last checkpoint: 100004
+Total events in database: 100002
+Run status: success
