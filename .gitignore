@@ -1,0 +1,29 @@
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Generated databases
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Generated benchmark data and pipeline output
+data/performance_events.jsonl
+data/rejected_events.jsonl
+
+# Environment variables
+.env
+.env.*
+
+# Editor and IDE files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
