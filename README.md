@@ -2,11 +2,63 @@
 
 A lightweight event-processing pipeline built to simulate near-real-time data ingestion using micro-batches. The project focuses on data quality, duplicate handling, checkpointing, late-arriving events, aggregate reporting, and safe reruns.
 
-## Project Overview
 
-This project simulates an event stream using JSON Lines (JSONL) input files. Events are read in batches, validated, and stored in SQLite. Checkpoints track processing progress so the pipeline can avoid reprocessing previously completed input lines.
+## Architecture Flow
 
-The project also generates synthetic datasets to test the pipeline at scale.
+```text
+JSONL Event Source
+       |
+       v
+Read Events in Micro-Batches
+       |
+       v
+Validate Schema and Business Rules
+       |
+       +---- Invalid Events ----> Rejected Records
+       |
+       v
+Deduplicate Using event_id
+       |
+       v
+Detect Late-Arriving Events
+       |
+       v
+Store Events in SQLite
+       |
+       v
+Update Checkpoint Transactionally
+       |
+       v
+Publish Aggregates and Reconciliation Results
+```
+
+The pipeline reads JSONL records in configurable batches, validates each record, stores valid events in SQLite, tracks rejected and late-arriving records, and reports aggregates. Checkpoints support safe reruns of completed input.
+
+
+
+## Data Dictionary
+
+| Field / Entity | Type | Purpose |
+|---|---|---|
+| `event_id` | String | Unique event identifier and deduplication key |
+| `event_type` | String | Event category used for aggregation |
+| `entity_id` | String | Identifier of the entity associated with an event |
+| `event_timestamp` | ISO-8601 timestamp | Time when the event occurred |
+| `amount` | Numeric | Non-negative event amount used in aggregates |
+| `checkpoints` | SQLite table | Tracks the last processed input line for a source |
+| `rejected_events` | SQLite table | Stores invalid records and validation errors |
+| `late_events` | SQLite table | Tracks events classified as late |
+
+### Assumptions and Constraints
+
+- `event_id` must be unique for accepted events.
+- Required event fields must be present and valid.
+- Timestamps must be parseable and include timezone information.
+- `amount` must be numeric, finite, and non-negative.
+- Events arriving more than 24 hours behind the maximum observed event timestamp are classified as late.
+- The current implementation does not define foreign-key relationships between event entities.
+
+
 
 ## Key Features
 
@@ -30,27 +82,26 @@ The project also generates synthetic datasets to test the pipeline at scale.
 - Python `unittest`
 - PowerShell for local execution on Windows
 
+
 ## Project Structure
 
 ```text
 Event_Pipeline/
 ├── data/
 │   ├── events.jsonl
-│   ├── test_events.jsonl
-│   ├── performance_events.jsonl
-│   ├── stream.db
-│   └── performance_v2.db
-├── src/
+│   └── test_events.jsonl
 ├── tests/
+│   ├── test_integration.py
 │   ├── test_pipeline.py
 │   └── test_streaming.py
+├── .gitignore
 ├── generate_events.py
 ├── main.py
 ├── requirements.txt
 └── README.md
 ```
 
-Generated datasets and SQLite databases are local test artifacts. They do not need to be committed to GitHub.
+Generated databases, benchmark datasets, and pipeline output files are kept locally and excluded from Git where appropriate.
 
 ## Setup
 

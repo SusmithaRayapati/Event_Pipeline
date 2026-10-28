@@ -1,4 +1,5 @@
 
+import uuid
 import os
 import json
 import math
@@ -23,8 +24,9 @@ def parse_timestamp(value):
     if not isinstance(value, str):
         raise ValueError("Timestamp must be a string")
 
-    normalized = value.replace("Z", "+00:00")
-    parsed = datetime.fromisoformat(normalized)
+    parsed = datetime.fromisoformat(
+        value.replace("Z", "+00:00")
+    )
 
     if parsed.tzinfo is None:
         raise ValueError("Timestamp must include a timezone")
@@ -33,6 +35,7 @@ def parse_timestamp(value):
 
 
 def validate_event(event):
+    """Validate required fields and business rules."""
     if not isinstance(event, dict):
         return ["Record must be a JSON object"]
 
@@ -70,12 +73,15 @@ def validate_event(event):
         or not math.isfinite(amount)
         or amount < 0
     ):
-        errors.append("amount must be a finite non-negative number")
+        errors.append(
+            "amount must be a finite non-negative number"
+        )
 
     return errors
 
 
 def setup_database():
+    """Create tables and initialize the checkpoint."""
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(DB_FILE) as conn:
@@ -109,6 +115,20 @@ def setup_database():
 
             CREATE INDEX IF NOT EXISTS idx_events_type
             ON events(event_type);
+
+            CREATE TABLE IF NOT EXISTS pipeline_runs (
+                run_id TEXT PRIMARY KEY,
+                source_file TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL,
+                input_lines INTEGER DEFAULT 0,
+                inserted_count INTEGER DEFAULT 0,
+                duplicate_count INTEGER DEFAULT 0,
+                rejected_count INTEGER DEFAULT 0,
+                late_count INTEGER DEFAULT 0,
+                failure_reason TEXT
+            );
         """)
 
         conn.execute("""
@@ -119,6 +139,7 @@ def setup_database():
 
 
 def process_and_checkpoint(batch):
+    """Process one batch and commit its data and checkpoint."""
     inserted = 0
     duplicates = 0
     rejected = 0
@@ -153,7 +174,7 @@ def process_and_checkpoint(batch):
                 if errors:
                     conn.execute("""
                         INSERT OR IGNORE INTO rejected_events
-                        (line_number, raw_record, errors)
+                            (line_number, raw_record, errors)
                         VALUES (?, ?, ?)
                     """, (
                         line_number,
@@ -170,8 +191,8 @@ def process_and_checkpoint(batch):
 
                 cursor = conn.execute("""
                     INSERT OR IGNORE INTO events
-                    (event_id, event_type, entity_id,
-                     event_timestamp, amount)
+                        (event_id, event_type, entity_id,
+                         event_timestamp, amount)
                     VALUES (?, ?, ?, ?, ?)
                 """, (
                     event["event_id"],
@@ -187,20 +208,21 @@ def process_and_checkpoint(batch):
 
                 inserted += 1
 
-                # Late means older than the allowed-lateness watermark.
                 if (
                     max_seen is not None
                     and event_time < max_seen - watermark_delay
                 ):
-                    conn.execute("""
+                    late_cursor = conn.execute("""
                         INSERT OR IGNORE INTO late_events
-                        (event_id, event_timestamp)
+                            (event_id, event_timestamp)
                         VALUES (?, ?)
                     """, (
                         event["event_id"],
                         timestamp,
                     ))
-                    late_count += 1
+
+                    if late_cursor.rowcount > 0:
+                        late_count += 1
 
                 if max_seen is None or event_time > max_seen:
                     max_seen = event_time
@@ -222,6 +244,7 @@ def process_and_checkpoint(batch):
 
 
 def generate_aggregates():
+    """Print event aggregates and reconciliation results."""
     with sqlite3.connect(DB_FILE) as conn:
         rows = conn.execute("""
             SELECT
@@ -272,71 +295,138 @@ def generate_aggregates():
 
 
 def main():
-    if BATCH_SIZE < 1:
-        raise ValueError("PIPELINE_BATCH_SIZE must be at least 1")
-
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(f"Missing input: {INPUT_FILE}")
-
-    setup_database()
-
-    with sqlite3.connect(DB_FILE) as conn:
-        checkpoint = conn.execute(
-            "SELECT last_line FROM checkpoints WHERE source = ?",
-            (SOURCE_NAME,),
-        ).fetchone()[0]
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc).isoformat()
 
     totals = [0, 0, 0, 0]
     processed_lines = 0
-    batch = []
+    status = "failed"
+    failure_reason = None
 
-    with INPUT_FILE.open("r", encoding="utf-8") as file:
-        for line_number, line in enumerate(file, start=1):
-            if line_number <= checkpoint:
-                continue
+    try:
+        setup_database()
 
-            batch.append((line_number, line))
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("""
+                INSERT INTO pipeline_runs
+                    (run_id, source_file, started_at, status)
+                VALUES (?, ?, ?, ?)
+            """, (
+                run_id,
+                str(INPUT_FILE),
+                started_at,
+                "running",
+            ))
 
-            if len(batch) >= BATCH_SIZE:
-                result = process_and_checkpoint(batch)
+        if BATCH_SIZE < 1:
+            raise ValueError("BATCH_SIZE must be at least 1.")
 
-                for index in range(4):
-                    totals[index] += result[index]
+        if not INPUT_FILE.exists():
+            raise FileNotFoundError(
+                f"Input file not found: {INPUT_FILE}"
+            )
 
-                processed_lines += len(batch)
-                batch = []
+        with sqlite3.connect(DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT last_line FROM checkpoints WHERE source = ?",
+                (SOURCE_NAME,),
+            ).fetchone()
+            checkpoint = row[0] if row else 0
+
+        batch = []
+
+        with INPUT_FILE.open("r", encoding="utf-8") as file:
+            for line_number, raw_line in enumerate(file, start=1):
+                if line_number <= checkpoint:
+                    continue
+
+                processed_lines += 1
+                batch.append((line_number, raw_line))
+
+                if len(batch) >= BATCH_SIZE:
+                    result = process_and_checkpoint(batch)
+                    totals = [
+                        a + b for a, b in zip(totals, result)
+                    ]
+                    batch = []
 
         if batch:
             result = process_and_checkpoint(batch)
+            totals = [
+                a + b for a, b in zip(totals, result)
+            ]
 
-            for index in range(4):
-                totals[index] += result[index]
+        with sqlite3.connect(DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT last_line FROM checkpoints WHERE source = ?",
+                (SOURCE_NAME,),
+            ).fetchone()
+            last_checkpoint = row[0] if row else 0
 
-            processed_lines += len(batch)
+            total_events = conn.execute(
+                "SELECT COUNT(*) FROM events"
+            ).fetchone()[0]
 
-    with sqlite3.connect(DB_FILE) as conn:
-        total_events = conn.execute(
-            "SELECT COUNT(*) FROM events"
-        ).fetchone()[0]
+        generate_aggregates()
+        status = "success"
 
-        current_checkpoint = conn.execute(
-            "SELECT last_line FROM checkpoints WHERE source = ?",
-            (SOURCE_NAME,),
-        ).fetchone()[0]
+        print(f"\nRun ID: {run_id}")
+        print(f"Source file: {INPUT_FILE}")
+        print(f"Started at: {started_at}")
+        print(f"Batch size: {BATCH_SIZE}")
+        print(f"Lines processed this run: {processed_lines}")
+        print(f"New events inserted: {totals[0]}")
+        print(f"Duplicates skipped: {totals[1]}")
+        print(f"Rejected records: {totals[2]}")
+        print(f"Late events detected this run: {totals[3]}")
+        print(f"Last checkpoint: {last_checkpoint}")
+        print(f"Total events in database: {total_events}")
 
-    print("\nSTREAMING PIPELINE REPORT")
-    print("-------------------------")
-    print(f"Input file: {INPUT_FILE}")
-    print(f"Batch size: {BATCH_SIZE}")
-    print(f"Lines processed this run: {processed_lines}")
-    print(f"New events inserted: {totals[0]}")
-    print(f"Duplicates skipped: {totals[1]}")
-    print(f"Rejected records: {totals[2]}")
-    print(f"Late events detected this run: {totals[3]}")
-    print(f"Checkpoint line: {current_checkpoint}")
-    print(f"Total database events: {total_events}")
+    except Exception as error:
+        failure_reason = f"{type(error).__name__}: {error}"
+        print(f"Pipeline failed: {failure_reason}")
+        raise
 
-    generate_aggregates()
+    finally:
+        
+        if DB_FILE.exists():
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                table_exists = conn.execute("""
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'pipeline_runs'
+                """).fetchone()
+
+                if table_exists:
+                    conn.execute("""
+                        UPDATE pipeline_runs
+                        SET ended_at = ?,
+                            status = ?,
+                            input_lines = ?,
+                            inserted_count = ?,
+                            duplicate_count = ?,
+                            rejected_count = ?,
+                            late_count = ?,
+                            failure_reason = ?
+                        WHERE run_id = ?
+                    """, (
+                        datetime.now(timezone.utc).isoformat(),
+                        status,
+                        processed_lines,
+                        totals[0],
+                        totals[1],
+                        totals[2],
+                        totals[3],
+                        failure_reason,
+                        run_id,
+                    ))
+                    conn.commit()
+            finally:
+                conn.close()
+
+        print(f"Run status: {status}")
 
 
 if __name__ == "__main__":
