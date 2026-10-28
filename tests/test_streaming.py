@@ -1,4 +1,3 @@
-
 import json
 import sqlite3
 import tempfile
@@ -103,9 +102,7 @@ class TestStreamingBehavior(unittest.TestCase):
             self.query("SELECT COUNT(*) FROM late_events")[0], 1
         )
         self.assertEqual(
-            self.query(
-                "SELECT event_id FROM late_events"
-            )[0],
+            self.query("SELECT event_id FROM late_events")[0],
             "evt_late",
         )
 
@@ -124,6 +121,7 @@ class TestStreamingBehavior(unittest.TestCase):
         )
 
         self.assertEqual(result, (2, 0, 0, 0))
+
         count, total_amount = self.query("""
             SELECT COUNT(*), SUM(amount) FROM events
         """)
@@ -136,9 +134,39 @@ class TestStreamingBehavior(unittest.TestCase):
         self.assertEqual(total_amount, 300)
         self.assertEqual(count, distinct_ids)
 
+    def test_batch_failure_rolls_back_events_and_checkpoint(self):
+        event = self.make_event(
+            "evt_rollback",
+            "2026-10-28T10:00:00+00:00",
+        )
+        batch = self.make_batch([event])
+
+        with patch.object(
+            pipeline,
+            "validate_event",
+            side_effect=RuntimeError("Simulated batch failure"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "Simulated batch failure"
+            ):
+                pipeline.process_and_checkpoint(batch)
+
+        event_count = self.query(
+            "SELECT COUNT(*) FROM events"
+        )[0]
+
+        checkpoint = self.query(
+            "SELECT last_line FROM checkpoints WHERE source = ?",
+            (self.input_file.name,),
+        )[0]
+
+        self.assertEqual(event_count, 0)
+        self.assertEqual(checkpoint, 0)
+
     def test_checkpoint_value(self):
         event = self.make_event(
-            "evt_001", "2026-10-28T10:00:00+00:00"
+            "evt_checkpoint",
+            "2026-10-28T10:00:00+00:00",
         )
 
         pipeline.process_and_checkpoint(
