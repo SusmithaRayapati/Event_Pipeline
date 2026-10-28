@@ -1,9 +1,25 @@
-# Event Streaming Pipeline with Python and SQLite
+# Event Pipeline — Reliable Micro-Batch Processing
 
-A lightweight event-processing pipeline built to simulate near-real-time data ingestion using micro-batches. The project focuses on data quality, duplicate handling, checkpointing, late-arriving events, aggregate reporting, and safe reruns.
+A Python and SQLite event-processing pipeline designed to simulate continuous event ingestion in micro-batches, validate incoming records, handle duplicates and late-arriving events, maintain checkpoints, and produce reconciled aggregate reports.
 
+## Project Overview
 
-## Architecture Flow
+Real-time systems need to process incoming events reliably, even when records are invalid, duplicated, delayed, or a previous run fails.
+
+This project demonstrates a micro-batch processing workflow with:
+
+- JSONL-based event ingestion
+- Schema and business-rule validation
+- Idempotent event insertion and deduplication
+- Checkpoint-based restart and recovery
+- Late-arriving event detection using a 24-hour threshold
+- Rejected-record tracking
+- Backfill processing with a separate checkpoint
+- Transactional batch processing
+- Aggregate reporting and reconciliation
+- Automated unit, streaming, and integration tests
+
+## Architecture
 
 ```text
 JSONL Event Source
@@ -12,78 +28,39 @@ JSONL Event Source
 Read Events in Micro-Batches
        |
        v
-Validate Schema and Business Rules
+Parse JSON and Validate Schema
        |
-       +---- Invalid Events ----> Rejected Records
+       +------ Invalid ------> Rejected Events
        |
        v
-Deduplicate Using event_id
+Deduplicate by Event ID
        |
        v
 Detect Late-Arriving Events
        |
        v
-Store Events in SQLite
+SQLite Transaction
+       |
+       +------ Events Table
+       +------ Late Events Table
+       +------ Checkpoint Table
        |
        v
-Update Checkpoint Transactionally
+Aggregate Report
        |
        v
-Publish Aggregates and Reconciliation Results
+Reconciliation and Run Metrics
 ```
 
-The pipeline reads JSONL records in configurable batches, validates each record, stores valid events in SQLite, tracks rejected and late-arriving records, and reports aggregates. Checkpoints support safe reruns of completed input.
+## Technology Stack
 
+- **Python** — event processing and validation
+- **SQLite** — persistent storage, transactions, checkpoints, and aggregates
+- **JSONL** — line-delimited event input
+- **unittest** — automated testing
+- **Git and GitHub** — version control and project delivery
 
-
-## Data Dictionary
-
-| Field / Entity | Type | Purpose |
-|---|---|---|
-| `event_id` | String | Unique event identifier and deduplication key |
-| `event_type` | String | Event category used for aggregation |
-| `entity_id` | String | Identifier of the entity associated with an event |
-| `event_timestamp` | ISO-8601 timestamp | Time when the event occurred |
-| `amount` | Numeric | Non-negative event amount used in aggregates |
-| `checkpoints` | SQLite table | Tracks the last processed input line for a source |
-| `rejected_events` | SQLite table | Stores invalid records and validation errors |
-| `late_events` | SQLite table | Tracks events classified as late |
-
-### Assumptions and Constraints
-
-- `event_id` must be unique for accepted events.
-- Required event fields must be present and valid.
-- Timestamps must be parseable and include timezone information.
-- `amount` must be numeric, finite, and non-negative.
-- Events arriving more than 24 hours behind the maximum observed event timestamp are classified as late.
-- The current implementation does not define foreign-key relationships between event entities.
-
-
-
-## Key Features
-
-- **Micro-batch processing:** Processes events in configurable batches.
-- **Data validation:** Checks required fields, timestamps, string fields, and non-negative numeric amounts.
-- **Duplicate handling:** Uses event IDs to prevent duplicate records from being stored.
-- **Checkpointing:** Persists the last processed input line.
-- **Late-event detection:** Uses a 24-hour event-time threshold.
-- **Rejected-record tracking:** Records invalid input and validation errors.
-- **SQLite storage:** Persists events, checkpoints, rejected records, and late-event information.
-- **Aggregate reporting:** Reports event counts and total amounts by event type.
-- **Reconciliation:** Compares total stored events with distinct event IDs.
-- **Synthetic data generation:** Creates reproducible datasets using a configurable random seed.
-- **Automated tests:** Covers validation, duplicates, empty input, checkpoints, late events, and reconciliation.
-
-## Tech Stack
-
-- Python
-- SQLite
-- JSON / JSONL
-- Python `unittest`
-- PowerShell for local execution on Windows
-
-
-## Project Structure
+## Repository Structure
 
 ```text
 Event_Pipeline/
@@ -94,115 +71,160 @@ Event_Pipeline/
 │   ├── test_integration.py
 │   ├── test_pipeline.py
 │   └── test_streaming.py
-├── .gitignore
 ├── generate_events.py
 ├── main.py
 ├── requirements.txt
-└── README.md
+├── README.md
+└── .gitignore
 ```
 
-Generated databases, benchmark datasets, and pipeline output files are kept locally and excluded from Git where appropriate.
+Generated benchmark datasets and SQLite database files are excluded from version control.
+
+## Event Schema
+
+Each input line must contain a JSON object with the following fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `event_id` | String | Unique event identifier |
+| `event_type` | String | Type of event |
+| `entity_id` | String | Associated business entity |
+| `event_timestamp` | ISO 8601 string | Time of the event, including timezone |
+| `amount` | Number | Finite, non-negative event amount |
+
+Records with missing or unexpected fields, invalid timestamps, invalid amounts, or malformed JSON are rejected.
 
 ## Setup
 
-Ensure Python 3.9 or later is installed.
+Python 3.9 or a compatible newer version is recommended.
 
-No third-party dependencies are required for the initial pipeline.
-
-Run the pipeline:
+Clone the repository:
 
 ```bash
+git clone https://github.com/SusmithaRayapati/Event_Pipeline.git
+cd Event_Pipeline
+```
+
+Create and activate a virtual environment:
+
+**Windows PowerShell**
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+Install dependencies, if any:
+
+```powershell
+pip install -r requirements.txt
+```
+
+## Run the Pipeline
+
+Run with the default input and database settings:
+
+```powershell
 python main.py
 ```
 
-Run automated tests:
+The default input is `data/events.jsonl`, and the default database is `data/stream.db`.
 
-```bash
-python -m unittest discover -s tests -v
-```
-
-## Configurable Processing
-
-The pipeline supports environment variables for its input file, SQLite database, and batch size.
-
-PowerShell example:
+Configure a separate input, database, or batch size with environment variables:
 
 ```powershell
-$env:PIPELINE_INPUT = "data/events.jsonl"
-$env:PIPELINE_DB = "data/stream.db"
-$env:PIPELINE_BATCH_SIZE = "1000"
-
+$env:PIPELINE_INPUT="data/test_events.jsonl"
+$env:PIPELINE_DB="data/test_run.db"
+$env:PIPELINE_BATCH_SIZE="100"
 python main.py
 ```
 
-Use a separate database when testing a new dataset to keep earlier results intact.
+The pipeline reports inserted events, duplicates, rejected records, late events, checkpoint position, aggregate totals, and reconciliation status.
 
-## Large-Dataset Test
+## Generate Synthetic Events
 
-Generate 100,000 regular events plus additional records for duplicate, invalid, and late-event scenarios:
-
-```powershell
-python generate_events.py --count 100000 --output data/performance_events.jsonl --seed 42
-```
-
-Run the performance test:
+Generate a repeatable dataset for testing:
 
 ```powershell
-$env:PIPELINE_INPUT = "data/performance_events.jsonl"
-$env:PIPELINE_DB = "data/performance_v2.db"
-$env:PIPELINE_BATCH_SIZE = "1000"
-
-Measure-Command { python main.py }
+python generate_events.py --count 1000 --output data/generated_test_events.jsonl
 ```
 
-### Observed Local Results
+The generator supports deterministic output through a random seed and can include edge cases such as duplicates, invalid records, and late-arriving events.
 
-| Metric | Result |
-|---|---:|
-| Input records | 100,004 |
-| Processing time | Approximately 8.61 seconds |
-| Stored unique events | 100,002 |
-| Rejected records | 1 |
-| Late events recorded | 1 |
-| Final checkpoint | 100,004 |
+Run it using a separate database:
 
-These are results from one local run. Actual performance depends on the machine, database state, and execution environment.
+```powershell
+$env:PIPELINE_INPUT="data/generated_test_events.jsonl"
+$env:PIPELINE_DB="data/generated_test.db"
+$env:PIPELINE_BATCH_SIZE="100"
+python main.py
+```
+
+## Recovery and Backfill
+
+The pipeline stores a checkpoint for the input source so completed lines can be skipped on a subsequent run.
+
+```powershell
+python main.py
+```
+
+To run in backfill mode:
+
+```powershell
+python main.py --backfill
+```
+
+Backfill mode uses a separate checkpoint namespace. Event IDs remain globally deduplicated in the events table.
 
 ## Run Automated Tests
 
+Run the full test suite:
+
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-Latest recorded test result: **19 tests passed**.
+**Latest verified result: 31 tests passed.**
 
-The tests cover event validation, malformed JSON, null and negative amounts, duplicate event IDs, empty input, checkpoint values, late-event detection, and aggregate reconciliation.
+Coverage includes event validation, duplicate handling, timestamp normalization, late-event detection, checkpoint behavior, transaction rollback, rejected-record retry behavior, backfill, recovery, and integration scenarios.
 
-## Recovery and Idempotency
+## Performance Benchmark
 
-The pipeline stores its checkpoint in SQLite and updates it within the batch-processing transaction. This helps keep data writes and recorded progress consistent.
+A local benchmark was run using a generated JSONL dataset and a SQLite database.
 
-A rerun against an already processed input file was verified to leave the event count and checkpoint unchanged.
+| Metric | Observed result |
+|---|---:|
+| Input records | 100,004 |
+| Batch size | 1,000 |
+| Measured runtime | Approximately 7.60 seconds |
+| Approximate throughput | 13,160 records/second |
 
-For a fresh experiment, use a new database path rather than deleting an existing database containing test results.
+These figures are from one local run and are not a universal performance guarantee. Actual performance depends on the machine, storage, database state, and input data.
 
-## Design Decisions
+## Reliability and Data Quality
 
-- **SQLite:** Keeps the project easy to run locally without requiring a separate database server.
-- **JSONL:** Supports line-by-line event ingestion and synthetic dataset generation.
-- **Batch processing:** Balances processing overhead and memory usage.
-- **Event IDs:** Provide a stable key for deduplication.
-- **Event-time threshold:** Separates significantly delayed events from ordinary out-of-order events.
-- **Reconciliation:** Helps detect inconsistencies in the stored event data.
+- **Deduplication:** a primary key on `event_id` prevents duplicate stored events.
+- **Checkpointing:** completed input lines are tracked for restart recovery.
+- **Transactional batches:** event writes and checkpoint updates are committed together.
+- **Schema validation:** malformed and invalid records are recorded separately.
+- **Late-event handling:** events arriving more than 24 hours behind the latest observed event timestamp are identified.
+- **Reconciliation:** stored event counts and distinct event IDs are compared before reporting success.
 
-## Future Improvements
+## Limitations and Future Improvements
 
-- Add explicit schema-versioning and schema-evolution tests.
-- Expand failure-injection tests for interruptions at different processing stages.
-- Add structured logging and clearer operational metrics.
-- Measure memory usage and compare performance across batch sizes.
-- Add automated CI testing through GitHub Actions.
+- SQLite is suitable for this demonstration but is not a distributed streaming platform.
+- Input ingestion uses a JSONL file rather than a live message broker.
+- The benchmark is a local measurement, not a controlled performance study.
+- Future improvements could include Kafka integration, a streaming framework, configurable event-time watermarks, CI automation, and monitoring dashboards.
 
-## Learning Outcomes
+## AI Assistance Disclosure
 
-This project demonstrates practical work with event ingestion, data validation, incremental processing, SQLite transactions, idempotency, checkpointing, late-arriving data, testing, and performance measurement.
+AI tools were used to assist with development tasks such as debugging, test design, and documentation. The implementation was reviewed and the automated test suite was executed locally. The project author remains responsible for understanding the code, verifying the results, and explaining the design decisions.
+
+## Author
+
+**Susmitha Rayapati**
+
+GitHub: https://github.com/SusmithaRayapati
+
+Repository: https://github.com/SusmithaRayapati/Event_Pipeline
