@@ -12,11 +12,15 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 
-# Generated benchmark data and pipeline output
-data/performance_events.jsonl
+# Generated test and benchmark data
+data/generated_test*.jsonl
+data/*_events.jsonl
 data/rejected_events.jsonl
 
-# Environment variables
+# Keep the committed test sample
+!data/test_events.jsonl
+
+# Environment variables and secrets
 .env
 .env.*
 

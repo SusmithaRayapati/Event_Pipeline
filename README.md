@@ -174,7 +174,7 @@ These are results from one local run. Actual performance depends on the machine,
 python -m unittest discover -s tests -v
 ```
 
-Latest recorded test result: **15 tests passed**.
+Latest recorded test result: **19 tests passed**.
 
 The tests cover event validation, malformed JSON, null and negative amounts, duplicate event IDs, empty input, checkpoint values, late-event detection, and aggregate reconciliation.
 
@@ -197,12 +197,11 @@ For a fresh experiment, use a new database path rather than deleting an existing
 
 ## Future Improvements
 
-- Add dedicated end-to-end integration tests.
-- Test interruption and recovery during a batch.
-- Add explicit schema-version handling and schema evolution tests.
-- Improve structured logging and pipeline run-status tracking.
-- Measure memory usage and benchmark multiple batch sizes.
-- Add automated CI testing.
+- Add explicit schema-versioning and schema-evolution tests.
+- Expand failure-injection tests for interruptions at different processing stages.
+- Add structured logging and clearer operational metrics.
+- Measure memory usage and compare performance across batch sizes.
+- Add automated CI testing through GitHub Actions.
 
 ## Learning Outcomes
 

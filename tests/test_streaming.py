@@ -1,3 +1,4 @@
+
 import json
 import sqlite3
 import tempfile
@@ -46,13 +47,16 @@ class TestStreamingBehavior(unittest.TestCase):
         ]
 
     def query(self, sql, parameters=()):
-        with sqlite3.connect(self.db_file) as conn:
+        conn = sqlite3.connect(self.db_file)
+        try:
             return conn.execute(sql, parameters).fetchone()
+        finally:
+            conn.close()
 
     def test_empty_input(self):
         result = pipeline.process_and_checkpoint([])
-
         self.assertEqual(result, (0, 0, 0, 0))
+
         self.assertEqual(
             self.query("SELECT COUNT(*) FROM events")[0], 0
         )
@@ -84,6 +88,33 @@ class TestStreamingBehavior(unittest.TestCase):
             )[0],
             2,
         )
+
+    def test_duplicate_id_with_different_payload_keeps_first_event(self):
+        original = self.make_event(
+            "evt_shared", "2026-10-28T10:00:00+00:00", 100
+        )
+        changed = self.make_event(
+            "evt_shared", "2026-10-28T11:00:00+00:00", 999
+        )
+
+        first = pipeline.process_and_checkpoint(
+            [(1, json.dumps(original))]
+        )
+        second = pipeline.process_and_checkpoint(
+            [(2, json.dumps(changed))]
+        )
+
+        self.assertEqual(first, (1, 0, 0, 0))
+        self.assertEqual(second, (0, 1, 0, 0))
+
+        stored = self.query(
+            "SELECT amount, event_timestamp FROM events "
+            "WHERE event_id = ?",
+            ("evt_shared",),
+        )
+
+        self.assertEqual(stored[0], 100)
+        self.assertEqual(stored[1], "2026-10-28T10:00:00+00:00")
 
     def test_late_event_detection(self):
         recent = self.make_event(
@@ -119,13 +150,11 @@ class TestStreamingBehavior(unittest.TestCase):
         result = pipeline.process_and_checkpoint(
             self.make_batch(events)
         )
-
         self.assertEqual(result, (2, 0, 0, 0))
 
         count, total_amount = self.query("""
             SELECT COUNT(*), SUM(amount) FROM events
         """)
-
         distinct_ids = self.query(
             "SELECT COUNT(DISTINCT event_id) FROM events"
         )[0]
@@ -136,8 +165,7 @@ class TestStreamingBehavior(unittest.TestCase):
 
     def test_batch_failure_rolls_back_events_and_checkpoint(self):
         event = self.make_event(
-            "evt_rollback",
-            "2026-10-28T10:00:00+00:00",
+            "evt_rollback", "2026-10-28T10:00:00+00:00"
         )
         batch = self.make_batch([event])
 
@@ -151,34 +179,129 @@ class TestStreamingBehavior(unittest.TestCase):
             ):
                 pipeline.process_and_checkpoint(batch)
 
-        event_count = self.query(
-            "SELECT COUNT(*) FROM events"
-        )[0]
-
-        checkpoint = self.query(
-            "SELECT last_line FROM checkpoints WHERE source = ?",
-            (self.input_file.name,),
-        )[0]
-
-        self.assertEqual(event_count, 0)
-        self.assertEqual(checkpoint, 0)
-
-    def test_checkpoint_value(self):
-        event = self.make_event(
-            "evt_checkpoint",
-            "2026-10-28T10:00:00+00:00",
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM events")[0], 0
+        )
+        self.assertEqual(
+            self.query(
+                "SELECT last_line FROM checkpoints WHERE source = ?",
+                (self.input_file.name,),
+            )[0],
+            0,
         )
 
-        pipeline.process_and_checkpoint(
+    def test_unexpected_fields_are_rejected(self):
+        event = self.make_event(
+            "evt_extra", "2026-10-28T10:00:00+00:00"
+        )
+        event["unexpected_field"] = "extra"
+
+        result = pipeline.process_and_checkpoint(
             self.make_batch([event])
         )
 
-        checkpoint = self.query(
-            "SELECT last_line FROM checkpoints WHERE source = ?",
-            (self.input_file.name,),
+        self.assertEqual(result, (0, 0, 1, 0))
+        self.assertEqual(
+            self.query(
+                "SELECT COUNT(*) FROM events WHERE event_id = ?",
+                ("evt_extra",),
+            )[0],
+            0,
+        )
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM rejected_events")[0],
+            1,
+        )
+
+    def test_same_event_id_from_another_source_is_deduplicated(self):
+        event = self.make_event(
+            "evt_shared", "2026-10-28T10:00:00+00:00"
+        )
+        raw = json.dumps(event)
+
+        pipeline.process_and_checkpoint(
+            [(1, raw)], checkpoint_source="source_a"
+        )
+        result = pipeline.process_and_checkpoint(
+            [(1, raw)], checkpoint_source="source_b"
+        )
+
+        self.assertEqual(result, (0, 1, 0, 0))
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM events")[0], 1
+        )
+
+    def test_rejected_record_is_saved(self):
+        malformed = '{"event_id": '
+
+        result = pipeline.process_and_checkpoint([(1, malformed)])
+
+        self.assertEqual(result, (0, 0, 1, 0))
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM rejected_events")[0],
+            1,
+        )
+
+    def test_retry_does_not_duplicate_rejected_record(self):
+        malformed = '{"event_id": '
+
+        first = pipeline.process_and_checkpoint([(1, malformed)])
+        second = pipeline.process_and_checkpoint([(1, malformed)])
+
+        self.assertEqual(first, (0, 0, 1, 0))
+        self.assertEqual(second, (0, 0, 1, 0))
+
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM rejected_events")[0],
+            1,
+        )
+
+    def test_non_object_json_is_rejected(self):
+        for raw in ("[]", '"hello"', "123", "null"):
+            with self.subTest(raw=raw):
+                result = pipeline.process_and_checkpoint([(1, raw)])
+                self.assertEqual(result, (0, 0, 1, 0))
+
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM events")[0], 0
+        )
+        self.assertEqual(
+            self.query("SELECT COUNT(*) FROM rejected_events")[0], 1
+        )
+
+    def test_timestamp_is_normalized_to_utc(self):
+        event = self.make_event(
+            "evt_timezone", "2026-10-28T15:30:00+05:30"
+        )
+
+        result = pipeline.process_and_checkpoint(
+            [(1, json.dumps(event))]
+        )
+
+        self.assertEqual(result, (1, 0, 0, 0))
+        stored_timestamp = self.query(
+            "SELECT event_timestamp FROM events WHERE event_id = ?",
+            ("evt_timezone",),
         )[0]
 
-        self.assertEqual(checkpoint, 1)
+        self.assertEqual(
+            stored_timestamp, "2026-10-28T10:00:00+00:00"
+        )
+
+    def test_checkpoint_value(self):
+        event = self.make_event(
+            "evt_checkpoint", "2026-10-28T10:00:00+00:00"
+        )
+
+        pipeline.process_and_checkpoint(self.make_batch([event]))
+
+        self.assertEqual(
+            self.query(
+                "SELECT last_line FROM checkpoints WHERE source = ?",
+                (self.input_file.name,),
+            )[0],
+            1,
+        )
 
 
 if __name__ == "__main__":
