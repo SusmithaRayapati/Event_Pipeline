@@ -174,7 +174,7 @@ These are results from one local run. Actual performance depends on the machine,
 python -m unittest discover -s tests -v
 ```
 
-Latest recorded test result: **14 tests passed**.
+Latest recorded test result: **15 tests passed**.
 
 The tests cover event validation, malformed JSON, null and negative amounts, duplicate event IDs, empty input, checkpoint values, late-event detection, and aggregate reconciliation.
 
